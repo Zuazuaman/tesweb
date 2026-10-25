@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Browser Stress Test: GPU, CPU, RAM</title>
+<style>
+:root{--bg:#0f1420;--pn:#171e2e;--bd:#2a3550;--tx:#e8ecf4;--mu:#8e9bb5;--ac:#5ee0ff;--wn:#ffb347;--er:#ff6b6b}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#stage{position:fixed;inset:0}
+#stage canvas,#c2{position:absolute;inset:0;width:100%;height:100%}
+#c2{position:fixed;pointer-events:none}
+#domlayer{position:fixed;inset:0;pointer-events:none;overflow:hidden}
+#domlayer i{position:absolute;width:14px;height:14px;border-radius:3px;opacity:.5;animation:dd 1.2s ease-in-out infinite alternate}
+@keyframes dd{from{transform:translateY(0) rotate(0);background:#ff6b57}to{transform:translateY(30px) rotate(180deg);background:#5ee0ff}}
+#hud{position:fixed;left:10px;top:10px;background:#0f1420d9;border:1px solid var(--bd);border-radius:8px;padding:8px 10px;font:12px/1.55 ui-monospace,Consolas,monospace;max-width:calc(100vw - 20px);z-index:5;pointer-events:none;white-space:pre}
+#hud canvas{display:block;margin-top:6px;width:100%;height:40px}
+#panel{position:fixed;right:0;top:0;bottom:0;width:320px;max-width:100vw;background:var(--pn);border-left:1px solid var(--bd);overflow:auto;padding:14px;z-index:10;transition:transform .2s}
+#panel.hide{transform:translateX(100%)}
+#tog{position:fixed;right:10px;top:10px;z-index:11;background:var(--pn);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit}
+#panel.hide~#tog{right:10px}
+#panel:not(.hide)~#tog{right:330px}
+h1{font-size:16px;margin:0 0 4px}
+h2{font-size:13px;margin:14px 0 6px;color:var(--ac);font-weight:600}
+.note{color:var(--mu);font-size:12px;margin:0 0 8px}
+.warn{background:#ffb34720;border:1px solid #ffb34766;border-radius:6px;padding:6px 8px;color:var(--wn);font-size:12px;margin:8px 0}
+.row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0}
+.row input[type=number],select{width:110px;background:#0f1420;color:var(--tx);border:1px solid var(--bd);border-radius:5px;padding:4px 6px;font:inherit}
+.row input[type=checkbox]{width:18px;height:18px}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+button.b{background:#0f1420;color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:7px 10px;cursor:pointer;font:inherit}
+button.b:hover{border-color:var(--ac)}
+button.b:focus-visible,#tog:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+button.go{background:var(--ac);color:#06202a;border-color:var(--ac);font-weight:600}
+button.go.on{background:var(--er);border-color:var(--er);color:#2a0606}
+#info,#bench{font:12px/1.55 ui-monospace,Consolas,monospace;color:var(--mu);white-space:pre-wrap;word-break:break-word}
+#msg{color:var(--er);font-size:12px;min-height:16px}
+@media (prefers-reduced-motion:reduce){#panel{transition:none}}
+@media (max-width:640px){#panel:not(.hide)~#tog{right:10px;top:auto;bottom:10px}}
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<canvas id="c2"></canvas>
+<div id="domlayer"></div>
+<div id="hud"><span id="hudtxt">Ready. Press Start in the settings panel.</span><canvas id="graph" width="320" height="40"></canvas></div>
+
+<aside id="panel">
+  <h1>Browser stress test</h1>
+  <p class="note">Test your GPU (3D), CPU (workers), RAM and overall browser performance. Adjust everything below.</p>
+  <div class="warn">High settings can freeze this tab, crash the browser or hang your device. Save your work first. Press Esc or Stop to release all load. Keep this tab in the foreground during the test.</div>
+  <div class="row"><label for="preset">Preset</label>
+    <select id="preset"><option value="">(custom)</option><option value="low">Light</option><option value="mid">Medium</option><option value="high">Heavy</option><option value="extreme">Extreme (will lag)</option></select></div>
+  <div id="form"></div>
+  <div class="btns">
+    <button class="b go" id="bgo">Start</button>
+    <button class="b" id="bapply">Apply</button>
+    <button class="b" id="bcopy">Copy link</button>
+    <button class="b" id="breset">Reset</button>
+    <button class="b" id="bbench">Quick benchmark</button>
+  </div>
+  <div id="msg"></div>
+  <h2>Benchmark results</h2>
+  <div id="bench">Not run yet.</div>
+  <h2>Device info</h2>
+  <div id="info"></div>
+</aside>
+<button id="tog" aria-label="Toggle settings panel">Settings</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const HC=navigator.hardwareConcurrency||4;
+
+/* ---------- Skema pengaturan ---------- */
+const SCHEMA=[
+ ['3D / GPU',[
+  {k:'obj',l:'3D objects',min:0,max:5000,d:300},
+  {k:'seg',l:'Geometry segments',min:4,max:128,d:32},
+  {k:'part',l:'Particles',min:0,max:3000000,d:50000},
+  {k:'fill',l:'Overdraw layers (fill rate)',min:0,max:60,d:2},
+  {k:'dpr',l:'Pixel ratio',min:.25,max:4,step:.25,d:1},
+  {k:'shadow',l:'Shadows',t:'b',d:1},
+  {k:'aa',l:'Antialiasing',t:'b',d:1}]],
+ ['CPU',[
+  {k:'cpu',l:'Worker threads',min:0,max:128,d:0},
+  {k:'load',l:'Load per thread (%)',min:1,max:100,d:100},
+  {k:'main',l:'Main thread load (%)',min:0,max:100,d:0}]],
+ ['RAM',[
+  {k:'ram',l:'Allocation target (MB)',min:0,max:32768,d:0},
+  {k:'rate',l:'Allocation speed (MB/s)',min:8,max:8192,d:256}]],
+ ['Other',[
+  {k:'c2d',l:'Canvas 2D particles',min:0,max:200000,d:0},
+  {k:'dom',l:'Animated DOM elements',min:0,max:10000,d:0},
+  {k:'dur',l:'Auto-stop (seconds, 0 = off)',min:0,max:86400,d:0},
+  {k:'auto',l:'Start automatically on load',t:'b',d:0},
+  {k:'hud',l:'Show HUD',t:'b',d:1}]]
+];
+const FIELDS=SCHEMA.flatMap(s=>s[1]);
+const DEF=Object.fromEntries(FIELDS.map(f=>[f.k,f.d]));
+const PRESETS={
+ low:{obj:50,seg:16,part:5000,fill:0,dpr:1,shadow:0,cpu:0,ram:0,c2d:0,dom:0},
+ mid:{obj:300,seg:32,part:50000,fill:2,dpr:1,shadow:1,cpu:Math.max(1,HC>>1),load:50,ram:512,c2d:2000,dom:200},
+ high:{obj:1000,seg:48,part:250000,fill:6,dpr:1.5,shadow:1,cpu:HC,load:90,ram:2048,c2d:10000,dom:1000},
+ extreme:{obj:3000,seg:64,part:1000000,fill:15,dpr:2,shadow:1,cpu:HC*2,load:100,main:50,ram:6144,rate:512,c2d:50000,dom:3000}
+};
+let cfg={...DEF};
+
+const clamp=(f,v)=>{v=Number(v);if(!isFinite(v))v=f.d;return Math.min(f.max,Math.max(f.min,v))};
+
+function buildForm(){
+ const root=$('#form');root.innerHTML='';
+ for(const [g,fs] of SCHEMA){
+  const h=document.createElement('h2');h.textContent=g;root.appendChild(h);
+  for(const f of fs){
+   const r=document.createElement('div');r.className='row';
+   const lb=document.createElement('label');lb.htmlFor='f_'+f.k;lb.textContent=f.l;
+   const i=document.createElement('input');i.id='f_'+f.k;
+   if(f.t==='b')i.type='checkbox';else{i.type='number';i.min=f.min;i.max=f.max;i.step=f.step||1}
+   i.addEventListener('change',()=>{readForm();$('#preset').value='';syncURL()});
+   r.append(lb,i);root.appendChild(r);
+  }
+ }
+}
+function writeForm(){for(const f of FIELDS){const i=$('#f_'+f.k);if(f.t==='b')i.checked=!!cfg[f.k];else i.value=cfg[f.k]}}
+function readForm(){for(const f of FIELDS){const i=$('#f_'+f.k);cfg[f.k]=f.t==='b'?(i.checked?1:0):clamp(f,i.value)}}
+
+function parseURL(){
+ const p=new URLSearchParams(location.search);
+ cfg={...DEF};
+ const pr=p.get('preset');
+ if(pr&&PRESETS[pr]){cfg={...cfg,...PRESETS[pr]};$('#preset').value=pr}
+ for(const f of FIELDS){
+  if(!p.has(f.k))continue;
+  const raw=p.get(f.k);
+  cfg[f.k]=f.t==='b'?(['1','true','on','yes'].includes(raw.toLowerCase())?1:0):clamp(f,raw);
+ }
+}
+function syncURL(){
+ const p=new URLSearchParams();
+ for(const f of FIELDS)if(cfg[f.k]!==DEF[f.k])p.set(f.k,cfg[f.k]);
+ const q=p.toString();
+ try{history.replaceState(null,'',location.pathname+(q?'?'+q:''))}catch(e){}
+}
+
+/* ---------- State ---------- */
+let run=false,raf=0,lastT=0,fr=0,ftSum=0,worst=0,busy=0,fpsHist=[];
+let R,scene,cam,meshes=[],pts,stageCanvas;
+let workers=[],workerOps=0,workerRate=0;
+let chunks=[],ramMB=0,ramTimer=0,ramErr='';
+let sampler=0,stopTimer=0,startedAt=0;
+let p2=null,ctx2=null;
+
+/* ---------- 3D (GPU) ---------- */
+function build3d(){
+ if(!window.THREE){$('#msg').textContent='three.js failed to load (check your connection/CDN). 3D test skipped.';return}
+ stageCanvas=document.createElement('canvas');$('#stage').appendChild(stageCanvas);
+ try{R=new THREE.WebGLRenderer({canvas:stageCanvas,antialias:!!cfg.aa,powerPreference:'high-performance'})}
+ catch(e){$('#msg').textContent='WebGL unavailable: '+e.message;R=null;return}
+ R.setPixelRatio(cfg.dpr);R.setSize(innerWidth,innerHeight,false);
+ R.setClearColor(0x0f1420);
+ R.shadowMap.enabled=!!cfg.shadow;
+ scene=new THREE.Scene();
+ cam=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,.1,500);scene.add(cam);
+ scene.add(new THREE.AmbientLight(0x6070a0,.6));
+ const dl=new THREE.DirectionalLight(0xffffff,.9);dl.position.set(40,60,30);
+ if(cfg.shadow){dl.castShadow=true;dl.shadow.mapSize.set(2048,2048);const c=dl.shadow.camera;c.left=c.bottom=-70;c.right=c.top=70;c.far=200}
+ scene.add(dl);
+ const l1=new THREE.PointLight(0x5ee0ff,1.2,120);l1.position.set(-30,10,20);scene.add(l1);
+ const l2=new THREE.PointLight(0xff6b57,1.2,120);l2.position.set(30,-10,-20);scene.add(l2);
+ const s=cfg.seg;
+ const geos=[new THREE.SphereGeometry(1.2,s,s),new THREE.TorusKnotGeometry(.9,.3,s*2,Math.max(4,s>>2)),new THREE.IcosahedronGeometry(1.3,Math.max(1,s>>4))];
+ for(let i=0;i<cfg.obj;i++){
+  const m=new THREE.Mesh(geos[i%3],new THREE.MeshStandardMaterial({color:new THREE.Color().setHSL(Math.random(),.65,.55),roughness:.35,metalness:.4}));
+  const r=45*Math.cbrt(Math.random()),a=Math.random()*6.283,b=Math.acos(2*Math.random()-1);
+  m.position.set(r*Math.sin(b)*Math.cos(a),r*Math.sin(b)*Math.sin(a),r*Math.cos(b));
+  m.userData={a:Math.random()*2,b:Math.random()*2};
+  m.castShadow=m.receiveShadow=!!cfg.shadow;
+  scene.add(m);meshes.push(m);
+ }
+ if(cfg.part>0){
+  const n=cfg.part,pos=new Float32Array(n*3);
+  for(let i=0;i<n;i++){const r=90*Math.cbrt(Math.random()),a=Math.random()*6.283,b=Math.acos(2*Math.random()-1);
+   pos[i*3]=r*Math.sin(b)*Math.cos(a);pos[i*3+1]=r*Math.sin(b)*Math.sin(a);pos[i*3+2]=r*Math.cos(b)}
+  const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  pts=new THREE.Points(g,new THREE.PointsMaterial({color:0x8fe8ff,size:.35,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,depthWrite:false}));
+  scene.add(pts);
+ }
+ const pg=new THREE.PlaneGeometry(20,20);
+ for(let i=0;i<cfg.fill;i++){
+  const m=new THREE.Mesh(pg,new THREE.MeshBasicMaterial({color:new THREE.Color().setHSL(i/Math.max(1,cfg.fill),.8,.5),transparent:true,opacity:.03,depthWrite:false,depthTest:false}));
+  m.position.z=-5-i*.001;cam.add(m);
+ }
+}
+function render3d(now){
+ if(!R)return;
+ const t=now/1000;
+ for(const m of meshes){m.rotation.x=m.userData.a*t;m.rotation.y=m.userData.b*t}
+ if(pts)pts.rotation.y=t*.05;
+ cam.position.set(Math.cos(t*.1)*65,18*Math.sin(t*.07),Math.sin(t*.1)*65);cam.lookAt(0,0,0);
+ R.render(scene,cam);
+}
+function dispose3d(){
+ if(R){scene.traverse(o=>{if(o.geometry)o.geometry.dispose();if(o.material)o.material.dispose()});R.dispose();try{R.forceContextLoss()}catch(e){}}
+ if(stageCanvas)stageCanvas.remove();
+ R=scene=cam=pts=stageCanvas=null;meshes=[];
+}
+
+/* ---------- Canvas 2D ---------- */
+function build2d(){
+ const c=$('#c2');c.width=innerWidth;c.height=innerHeight;ctx2=c.getContext('2d');
+ const n=cfg.c2d;p2={n,x:new Float32Array(n),y:new Float32Array(n),vx:new Float32Array(n),vy:new Float32Array(n)};
+ for(let i=0;i<n;i++){p2.x[i]=Math.random()*c.width;p2.y[i]=Math.random()*c.height;p2.vx[i]=(Math.random()-.5)*4;p2.vy[i]=(Math.random()-.5)*4}
+}
+function draw2d(){
+ if(!p2||!p2.n){return}
+ const c=ctx2.canvas,W=c.width,H=c.height;
+ ctx2.clearRect(0,0,W,H);ctx2.fillStyle='rgba(255,179,71,.6)';ctx2.beginPath();
+ for(let i=0;i<p2.n;i++){
+  let x=p2.x[i]+p2.vx[i],y=p2.y[i]+p2.vy[i];
+  if(x<0||x>W)p2.vx[i]*=-1;if(y<0||y>H)p2.vy[i]*=-1;
+  p2.x[i]=x;p2.y[i]=y;ctx2.moveTo(x+3,y);ctx2.arc(x,y,3,0,6.2832);
+ }
+ ctx2.fill();
+}
+function clear2d(){if(ctx2)ctx2.clearRect(0,0,ctx2.canvas.width,ctx2.canvas.height);p2=null}
+
+/* ---------- DOM ---------- */
+function buildDom(){
+ const L=$('#domlayer'),fr=document.createDocumentFragment();
+ for(let i=0;i<cfg.dom;i++){const e=document.createElement('i');
+  e.style.left=Math.random()*100+'%';e.style.top=Math.random()*100+'%';e.style.animationDelay=(-Math.random()*1.2)+'s';fr.appendChild(e)}
+ L.appendChild(fr);
+}
+
+/* ---------- CPU workers ---------- */
+function startWorkers(){
+ if(!cfg.cpu)return;
+ const code=[
+  "let load=100,n=0;",
+  "(function loop(){const t=performance.now(),slice=100,busy=slice*load/100;let x=0;",
+  "while(performance.now()-t<busy){for(let i=0;i<20000;i++)x+=Math.sqrt(i)*Math.sin(i);n+=20000}",
+  "postMessage({n:n,x:x>1e308});n=0;setTimeout(loop,Math.max(0,slice-busy))})();",
+  "onmessage=e=>{if(e.data.load)load=e.data.load}"
+ ].join('\n');
+ const url=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));
+ for(let i=0;i<cfg.cpu;i++){
+  try{const w=new Worker(url);w.postMessage({load:cfg.load});w.onmessage=e=>{workerOps+=e.data.n};workers.push(w)}
+  catch(e){$('#msg').textContent='Failed to create worker: '+e.message;break}
+ }
+ URL.revokeObjectURL(url);
+}
+function stopWorkers(){workers.forEach(w=>w.terminate());workers=[];workerOps=0;workerRate=0}
+
+/* ---------- RAM ---------- */
+function startRam(){
+ ramErr='';
+ if(!cfg.ram)return;
+ ramTimer=setInterval(()=>{
+  let todo=Math.min(cfg.ram-ramMB,cfg.rate/10);
+  if(todo<=0)return;
+  try{
+   while(todo>0){
+    const n=Math.min(64,todo),b=new Uint8Array(Math.floor(n*1048576));
+    for(let i=0;i<b.length;i+=4096)b[i]=(i>>12)|1; // write so pages are actually committed
+    chunks.push(b);ramMB+=n;todo-=n;
+   }
+  }catch(e){ramErr='Allocation stopped at '+Math.round(ramMB)+' MB: '+e.message;clearInterval(ramTimer);ramTimer=0}
+ },100);
+}
+function freeRam(){clearInterval(ramTimer);ramTimer=0;chunks=[];ramMB=0}
+
+/* ---------- Loop utama ---------- */
+function loop(now){
+ if(!run)return;
+ raf=requestAnimationFrame(loop);
+ const t0=performance.now(),dt=now-lastT;lastT=now;
+ if(dt>0&&dt<5000){fr++;ftSum+=dt;if(dt>worst)worst=dt}
+ if(cfg.main>0){const e=t0+cfg.main/100*16;while(performance.now()<e)Math.sqrt(Math.random())}
+ draw2d();render3d(now);
+ busy+=performance.now()-t0;
+}
+
+/* ---------- HUD ---------- */
+const fmt=(n,d=1)=>Number(n).toFixed(d);
+let lastSample=0;
+function sample(){
+ const now=performance.now(),el=now-lastSample;lastSample=now;
+ const fps=fr/el*1000,avg=fr?ftSum/fr:0,jsb=Math.min(100,busy/el*100);
+ workerRate=workerOps/el/1000; // juta op/detik
+ workerOps=0;
+ fpsHist.push(fps);if(fpsHist.length>80)fpsHist.shift();
+ const thr=cfg.cpu*cfg.load/100;
+ const cpuEst=Math.min(100,(thr+jsb/100)/HC*100);
+ const mem=performance.memory;
+ const lines=[
+  `FPS ${fmt(fps)}   frame ${fmt(avg)} ms   worst ${fmt(worst,0)} ms`,
+  R?`3D  draw calls ${R.info.render.calls}   triangles ${R.info.render.triangles.toLocaleString('en-US')}   points ${R.info.render.points.toLocaleString('en-US')}`:'3D  off',
+  `CPU main thread (JS) ${fmt(jsb,0)}%   workers ${workers.length}, ${fmt(workerRate,0)} Mops/s`,
+  `CPU estimate ${fmt(cpuEst,0)}% of ${HC} threads`,
+  `RAM allocated ${Math.round(ramMB)} / ${cfg.ram} MB`+(mem?`   JS heap ${Math.round(mem.usedJSHeapSize/1048576)} / ${Math.round(mem.jsHeapSizeLimit/1048576)} MB`:'   JS heap: not supported by this browser'),
+  `Running ${fmt((now-startedAt)/1000,0)} s`+(ramErr?'\n'+ramErr:'')
+ ];
+ $('#hudtxt').textContent=lines.join('\n');
+ drawGraph();
+ fr=0;ftSum=0;worst=0;busy=0;
+}
+function drawGraph(){
+ const c=$('#graph'),g=c.getContext('2d'),W=c.width,H=c.height;
+ g.clearRect(0,0,W,H);
+ const mx=Math.max(60,...fpsHist);
+ g.strokeStyle='#2a3550';g.beginPath();g.moveTo(0,H-H*30/mx);g.lineTo(W,H-H*30/mx);g.stroke();
+ g.strokeStyle='#5ee0ff';g.lineWidth=1.5;g.beginPath();
+ fpsHist.forEach((v,i)=>{const x=i/79*W,y=H-(v/mx)*H;i?g.lineTo(x,y):g.moveTo(x,y)});g.stroke();
+}
+
+/* ---------- Kontrol ---------- */
+function start(){
+ if(run)stop();
+ $('#msg').textContent='';
+ readForm();syncURL();
+ run=true;startedAt=lastSample=performance.now();fpsHist=[];
+ $('#hud').style.display=cfg.hud?'block':'none';
+ build3d();build2d();buildDom();startWorkers();startRam();
+ lastT=performance.now();raf=requestAnimationFrame(loop);
+ sampler=setInterval(sample,500);
+ if(cfg.dur)stopTimer=setTimeout(stop,cfg.dur*1000);
+ $('#bgo').textContent='Stop';$('#bgo').classList.add('on');
+}
+function stop(){
+ run=false;cancelAnimationFrame(raf);clearInterval(sampler);clearTimeout(stopTimer);
+ dispose3d();clear2d();$('#domlayer').innerHTML='';stopWorkers();freeRam();
+ $('#bgo').textContent='Start';$('#bgo').classList.remove('on');
+ $('#hudtxt').textContent='Stopped. All load released.';
+}
+function applyPreset(name){
+ if(!PRESETS[name])return;
+ cfg={...DEF,...PRESETS[name],auto:cfg.auto,hud:cfg.hud};writeForm();syncURL();
+}
+
+$('#bgo').onclick=()=>run?stop():start();
+$('#bapply').onclick=()=>{readForm();syncURL();run?start():($('#msg').textContent='Settings saved. Press Start.')};
+$('#preset').onchange=e=>{applyPreset(e.target.value);if(run)start()};
+$('#breset').onclick=()=>{cfg={...DEF};$('#preset').value='';writeForm();syncURL()};
+$('#bcopy').onclick=async()=>{readForm();syncURL();try{await navigator.clipboard.writeText(location.href);$('#msg').style.color='var(--ac)';$('#msg').textContent='Link copied.'}catch(e){prompt('Copy this link:',location.href)}setTimeout(()=>{$('#msg').textContent='';$('#msg').style.color=''},2000)};
+$('#tog').onclick=()=>$('#panel').classList.toggle('hide');
+addEventListener('keydown',e=>{if(e.key==='Escape'&&run)stop()});
+addEventListener('resize',()=>{if(R){R.setSize(innerWidth,innerHeight,false);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}const c=$('#c2');c.width=innerWidth;c.height=innerHeight});
+
+/* ---------- Benchmark cepat (~2 detik) ---------- */
+$('#bbench').onclick=async()=>{
+ const out=$('#bench');out.textContent='Measuring single-thread CPU…';
+ await new Promise(r=>setTimeout(r,50));
+ let t=performance.now(),n=0,x=0;
+ while(performance.now()-t<1000){for(let i=0;i<1e5;i++)x+=Math.sqrt(i)*Math.sin(i);n+=1e5}
+ const cpu=n/1e6/((performance.now()-t)/1000);
+ out.textContent='Measuring memory bandwidth…';await new Promise(r=>setTimeout(r,50));
+ const a=new Uint8Array(64<<20);a.fill(1);t=performance.now();let c=0;
+ while(performance.now()-t<700){a.copyWithin(0,32<<20);c+=32}
+ const bw=c/((performance.now()-t)/1000);
+ out.textContent=`Single-thread CPU: ${fmt(cpu,0)} Mops/s\nMemory bandwidth: ${fmt(bw,0)} MB/s\nUse it to compare devices and browsers, not as an absolute score.`;
+};
+
+/* ---------- Info perangkat ---------- */
+function deviceInfo(){
+ let gpu='unknown',gl2='-',maxTex='-';
+ try{
+  const c=document.createElement('canvas'),g=c.getContext('webgl2')||c.getContext('webgl');
+  if(g){gl2=g instanceof WebGL2RenderingContext?'WebGL 2':'WebGL 1';maxTex=g.getParameter(g.MAX_TEXTURE_SIZE);
+   const e=g.getExtension('WEBGL_debug_renderer_info');gpu=e?g.getParameter(e.UNMASKED_RENDERER_WEBGL):g.getParameter(g.RENDERER)}
+  else gl2='no WebGL';
+ }catch(e){}
+ $('#info').textContent=[
+  `GPU: ${gpu}`,`Graphics API: ${gl2}, max texture ${maxTex}`,
+  `CPU threads: ${HC}`,`Device RAM: ${navigator.deviceMemory?'≥ '+navigator.deviceMemory+' GB (rounded by browser)':'not reported'}`,
+  `Screen: ${screen.width}×${screen.height} @${devicePixelRatio}x`,`Browser: ${navigator.userAgent}`,
+  `Workers: ${typeof Worker!=='undefined'?'yes':'no'}   OffscreenCanvas: ${typeof OffscreenCanvas!=='undefined'?'yes':'no'}   WebGPU: ${navigator.gpu?'yes':'no'}`
+ ].join('\n');
+}
+
+/* ---------- Init ---------- */
+buildForm();parseURL();writeForm();deviceInfo();
+if(innerWidth<700)$('#panel').classList.add('hide');
+if(cfg.auto)start();
+</script>
+</body>
+</html>
